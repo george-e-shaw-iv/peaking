@@ -1,0 +1,37 @@
+# Peaking daemon configuration file
+# Location: %APPDATA%\Peaking\config.toml
+# Written by: peaking-gui
+# Read by:    peaking-daemon (hot-reloaded on change)
+
+[global]
+# Length of the rolling video/audio ring buffer in seconds.
+# Range: 5–120. Default: 15.
+buffer_length_secs = 15
+
+# Virtual-key name of the global clip hotkey.
+# Default: "F8"
+hotkey = "F8"
+
+# Directory under which per-game clip subdirectories are created.
+# %USERPROFILE% is expanded at runtime.
+# Default: "%USERPROFILE%\Videos\Peaking"
+clip_output_dir = "%USERPROFILE%\\Videos\\Peaking"
+
+# Each [[applications]] block defines a game the daemon should monitor.
+# The daemon starts buffering when it detects the process running and
+# stops when the process exits.
+# There are no default entries; the user adds these via the GUI.
+
+[[applications]]
+display_name    = "Rocket League"
+executable_name = "RocketLeague.exe"
+executable_path = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\rocketleague\\Binaries\\Win64\\RocketLeague.exe"
+# Optional overrides — omit to use the global values above.
+# buffer_length_secs = 30
+# hotkey = "F9"
+
+[[applications]]
+display_name    = "Apex Legends"
+executable_name = "r5apex.exe"
+executable_path = "C:\\Program Files (x86)\\Origin Games\\Apex\\r5apex.exe"
+# No overrides — uses global defaults.

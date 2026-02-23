@@ -1,0 +1,50 @@
+[package]
+name = "peaking-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["clock"] }
+notify = "6"
+serde = { version = "1", features = ["derive"] }
+sysinfo = "0.32"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+# Windows-only: screen capture (WGC), audio capture (WASAPI), and hardware encoding (NVENC).
+# On Windows the user must set FFMPEG_DIR to a pre-built FFmpeg 6.x dev tree that includes
+# NVENC support (e.g. the GPL build from https://www.gyan.dev/ffmpeg/builds/).
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+ffmpeg-next = "6"
+windows = { version = "0.57", features = [
+    # WinRT / WGC
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    # D3D11 / DXGI for frame readback
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # Monitor enumeration
+    "Win32_Graphics_Gdi",
+    # COM + WinRT interop
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Graphics_Capture",
+    # WASAPI
+    "Win32_Media",
+    "Win32_Media_Audio",
+    # Low-level keyboard hook (WH_KEYBOARD_LL)
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    # Windows startup registry
+    "Win32_System_Registry",
+] }

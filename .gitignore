@@ -1,0 +1,19 @@
+# Rust build artifacts
+target/
+
+# Node / Electron
+node_modules/
+gui/dist/
+gui/out/
+
+# Electron builder output
+release/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml

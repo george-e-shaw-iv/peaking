@@ -1,0 +1,29 @@
+# Peaking daemon status file
+# Location: %APPDATA%\Peaking\status.toml
+# Written by: peaking-daemon (updated on every state change)
+# Read by:    peaking-gui (polled on a short interval, ~2 seconds)
+
+# Daemon binary version, set at compile time from Cargo.toml.
+version = "0.1.0"
+
+# Current operational state. One of: "idle", "recording", "flushing".
+#   idle      - No watched process is running; ring buffer is inactive.
+#   recording - A watched process is running and frames are being buffered.
+#   flushing  - The ring buffer is being written and muxed to an MP4 file.
+state = "recording"
+
+# Display name of the application currently being recorded.
+# Absent when state is "idle".
+active_application = "Rocket League"
+
+# Absolute path to the most recently saved clip.
+# Absent if no clip has been saved in this session.
+last_clip_path = "C:\\Users\\george\\Videos\\Peaking\\Rocket League\\2026-02-22_14-30-00.mp4"
+
+# RFC 3339 timestamp of when the most recent clip was saved.
+# Absent if no clip has been saved in this session.
+last_clip_timestamp = "2026-02-22T14:30:00-05:00"
+
+# Human-readable error message from the most recent non-fatal error.
+# Absent when there is no error.
+# error = "Failed to write clip: disk full"
