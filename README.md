@@ -36,9 +36,18 @@ Either component can run independently — the daemon works headlessly without t
 
 ## Requirements
 
+**Runtime**
 - Windows 10/11
 - NVIDIA GPU with NVENC support
-- [FFmpeg 6.x Windows shared build](https://github.com/BtbN/FFmpeg-Builds/releases) (GPL, with NVENC)
+
+**To build the daemon**
+- [Rust](https://rustup.rs) (stable, MSVC toolchain — installed automatically by rustup on Windows)
+- Visual Studio 2022 with the **Desktop development with C++** workload, or the standalone [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the same workload
+- [git](https://git-scm.com/download/win) (used by the FFmpeg setup script to clone vcpkg)
+- [LLVM](https://releases.llvm.org) — provides `libclang.dll`, required by `bindgen` when compiling `ffmpeg-sys-next`; installed automatically by the setup script via `winget`
+
+**To build the GUI**
+- [Node.js](https://nodejs.org) (LTS)
 
 ---
 
@@ -46,17 +55,27 @@ Either component can run independently — the daemon works headlessly without t
 
 ### Daemon
 
-Requires the Rust toolchain and MSVC build tools installed on Windows.
+FFmpeg is statically linked into the daemon binary — no FFmpeg DLLs are needed at runtime. A setup script handles fetching and compiling a static FFmpeg via vcpkg, and setting the required environment variables. Run it once from PowerShell:
 
 ```powershell
-# Point ffmpeg-sys-next at your FFmpeg SDK (set permanently or per-session)
-$env:FFMPEG_DIR = "C:\ffmpeg"
+.\scripts\Setup-Ffmpeg.ps1
+```
 
+If Visual Studio is installed but missing the C++ workload, add it first:
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify `
+    --installPath "C:\Program Files\Microsoft Visual Studio\2022\Community" `
+    --add Microsoft.VisualStudio.Workload.NativeDesktop `
+    --includeRecommended --quiet --wait
+```
+
+Then build (open a new terminal first so the environment variables set by the script are picked up):
+
+```powershell
 cd daemon
 cargo build --release
 ```
-
-The FFmpeg `.dll` files from `%FFMPEG_DIR%\bin` must be available on `PATH` (or copied next to the exe) at runtime.
 
 ### GUI
 
