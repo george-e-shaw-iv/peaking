@@ -214,7 +214,7 @@ mod imp {
             let sws_ctx = SwsCtxGuard(ffsys::sws_getContext(
                 config.width as i32,  config.height as i32, ffsys::AVPixelFormat::AV_PIX_FMT_BGRA,
                 config.width as i32,  config.height as i32, ffsys::AVPixelFormat::AV_PIX_FMT_NV12,
-                ffsys::SWS_BILINEAR as i32,
+                ffsys::SwsFlags::SWS_BILINEAR as i32,
                 ptr::null_mut(), ptr::null_mut(), ptr::null(),
             ));
             if sws_ctx.0.is_null() {

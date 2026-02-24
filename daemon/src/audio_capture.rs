@@ -105,27 +105,32 @@ mod imp {
                     continue;
                 }
 
-                let mut data_ptr = std::ptr::null_mut();
-                let mut num_frames: u32 = 0;
-                let mut flags: u32 = 0;
+                // Scope data_ptr (a raw pointer, not Send) to before the .await.
+                let (samples, timestamp_ms) = {
+                    let mut data_ptr = std::ptr::null_mut();
+                    let mut num_frames: u32 = 0;
+                    let mut flags: u32 = 0;
 
-                capture_client
-                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
-                    .context("GetBuffer failed")?;
+                    capture_client
+                        .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
+                        .context("GetBuffer failed")?;
 
-                let timestamp_ms = session_start.elapsed().as_millis() as u64;
-                let num_samples = num_frames as usize * channels as usize;
+                    let timestamp_ms = session_start.elapsed().as_millis() as u64;
+                    let num_samples = num_frames as usize * channels as usize;
 
-                let samples: Vec<f32> = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
-                    vec![0.0f32; num_samples]
-                } else {
-                    // WASAPI in shared mode with FLOAT mix format delivers IEEE 754 f32.
-                    std::slice::from_raw_parts(data_ptr as *const f32, num_samples).to_vec()
+                    let samples: Vec<f32> = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        vec![0.0f32; num_samples]
+                    } else {
+                        // WASAPI in shared mode with FLOAT mix format delivers IEEE 754 f32.
+                        std::slice::from_raw_parts(data_ptr as *const f32, num_samples).to_vec()
+                    };
+
+                    capture_client
+                        .ReleaseBuffer(num_frames)
+                        .context("ReleaseBuffer failed")?;
+
+                    (samples, timestamp_ms)
                 };
-
-                capture_client
-                    .ReleaseBuffer(num_frames)
-                    .context("ReleaseBuffer failed")?;
 
                 let _ = audio_tx
                     .send(RawAudio {

@@ -34,7 +34,7 @@ mod imp {
         Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
         GraphicsCaptureSession,
     };
-    use windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess;
+    use windows::Win32::Graphics::Direct3D11::IDirect3DDxgiInterfaceAccess;
     use windows::Graphics::DirectX::DirectXPixelFormat;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -45,11 +45,15 @@ mod imp {
     };
     use windows::Win32::Graphics::Dxgi::IDXGIDevice;
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-    use windows::Win32::Graphics::Dxgi::DXGI_SAMPLE_DESC;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
     use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
     use super::RawFrame;
+
+    /// Safety: IDirect3DDevice wraps a D3D11 device, which is thread-safe.
+    struct SendDevice(windows::Graphics::DirectX::Direct3D11::IDirect3DDevice);
+    unsafe impl Send for SendDevice {}
 
     /// Creates a hardware D3D11 device with BGRA surface support.
     fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
@@ -144,7 +148,7 @@ mod imp {
         mut stop_rx: watch::Receiver<bool>,
     ) -> Result<()> {
         let (d3d_device, d3d_context) = create_d3d11_device()?;
-        let direct3d_device = create_direct3d_device(&d3d_device)?;
+        let direct3d_device = SendDevice(create_direct3d_device(&d3d_device)?);
 
         // Get the primary monitor and create a WGC capture item for it.
         let monitor =
@@ -161,7 +165,7 @@ mod imp {
 
         // CreateFreeThreaded: no dispatcher queue / message pump needed.
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &direct3d_device,
+            &direct3d_device.0,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             2,
             size,
