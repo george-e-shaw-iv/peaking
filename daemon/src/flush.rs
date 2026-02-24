@@ -98,7 +98,7 @@ pub async fn flush_to_disk(
 #[cfg(windows)]
 mod imp {
     use anyhow::{bail, Result};
-    use ffmpeg_next::sys as ffsys;
+    use ffmpeg_sys_next as ffsys;
     use std::ffi::CString;
     use std::path::PathBuf;
 
@@ -131,9 +131,6 @@ mod imp {
             .map_err(|e| anyhow::anyhow!("Invalid path characters: {e}"))?;
 
         unsafe {
-            // Initialise FFmpeg (idempotent).
-            ffmpeg_next::init().ok();
-
             // ── Allocate output format context ────────────────────────────────
             let mut raw_octx: *mut ffsys::AVFormatContext = std::ptr::null_mut();
             let ret = ffsys::avformat_alloc_output_context2(

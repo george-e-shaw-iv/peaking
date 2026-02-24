@@ -45,36 +45,108 @@ impl Default for EncoderConfig {
 
 #[cfg(windows)]
 mod imp {
-    use anyhow::{Context, Result};
-    use ffmpeg_next::{self as ffmpeg, codec, encoder, format, frame, software, Packet, Rational};
-    use ffmpeg_next::format::Pixel;
-    use ffmpeg_next::software::scaling::Flags;
+    use anyhow::{bail, Result};
+    use ffmpeg_sys_next as ffsys;
+    use std::ptr;
 
     use super::{AV_PKT_FLAG_KEY, EncoderConfig};
     use crate::audio_capture::RawAudio;
     use crate::capture::RawFrame;
     use crate::ring_buffer::{AudioCodecParams, EncodedPacket, EncodedSegment, VideoCodecParams};
 
-    fn packet_to_encoded(pkt: &Packet) -> EncodedPacket {
-        EncodedPacket {
-            data: pkt.data().unwrap_or(&[]).to_vec(),
-            pts: pkt.pts().unwrap_or(0),
-            dts: pkt.dts().unwrap_or(0),
-            duration: pkt.duration(),
-            is_key: (pkt.flags() & AV_PKT_FLAG_KEY) != 0,
+    // ── RAII wrappers ─────────────────────────────────────────────────────────
+
+    struct CodecCtxGuard(*mut ffsys::AVCodecContext);
+    unsafe impl Send for CodecCtxGuard {}
+    impl Drop for CodecCtxGuard {
+        fn drop(&mut self) {
+            unsafe { ffsys::avcodec_free_context(&mut self.0) }
         }
     }
+
+    struct SwsCtxGuard(*mut ffsys::SwsContext);
+    unsafe impl Send for SwsCtxGuard {}
+    impl Drop for SwsCtxGuard {
+        fn drop(&mut self) {
+            unsafe { ffsys::sws_freeContext(self.0) }
+        }
+    }
+
+    struct FrameGuard(*mut ffsys::AVFrame);
+    unsafe impl Send for FrameGuard {}
+    impl Drop for FrameGuard {
+        fn drop(&mut self) {
+            unsafe { ffsys::av_frame_free(&mut self.0) }
+        }
+    }
+
+    struct PacketGuard(*mut ffsys::AVPacket);
+    unsafe impl Send for PacketGuard {}
+    impl Drop for PacketGuard {
+        fn drop(&mut self) {
+            unsafe { ffsys::av_packet_free(&mut self.0) }
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Reads `extradata` out of a codec context after `avcodec_open2`.
+    unsafe fn read_extradata(ctx: *mut ffsys::AVCodecContext) -> Vec<u8> {
+        if (*ctx).extradata.is_null() || (*ctx).extradata_size == 0 {
+            vec![]
+        } else {
+            std::slice::from_raw_parts((*ctx).extradata, (*ctx).extradata_size as usize).to_vec()
+        }
+    }
+
+    /// Reinterpret a `&[f32]` as `&[u8]`.
+    fn f32_as_u8(s: &[f32]) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4) }
+    }
+
+    /// Drains all available encoded packets from `ctx` into `out`.
+    /// Stops on EAGAIN or EOF — both are normal exits from the receive loop.
+    unsafe fn drain_packets(
+        ctx: *mut ffsys::AVCodecContext,
+        out: &mut Vec<EncodedPacket>,
+    ) {
+        let pkt = PacketGuard(ffsys::av_packet_alloc());
+        if pkt.0.is_null() {
+            return;
+        }
+        loop {
+            let ret = ffsys::avcodec_receive_packet(ctx, pkt.0);
+            if ret < 0 {
+                break; // AVERROR(EAGAIN) or AVERROR_EOF — normal
+            }
+            let data = if (*pkt.0).data.is_null() || (*pkt.0).size == 0 {
+                vec![]
+            } else {
+                std::slice::from_raw_parts((*pkt.0).data, (*pkt.0).size as usize).to_vec()
+            };
+            out.push(EncodedPacket {
+                data,
+                pts: (*pkt.0).pts,
+                dts: (*pkt.0).dts,
+                duration: (*pkt.0).duration,
+                is_key: ((*pkt.0).flags & AV_PKT_FLAG_KEY) != 0,
+            });
+            ffsys::av_packet_unref(pkt.0);
+        }
+    }
+
+    // ── SegmentEncoderInner ───────────────────────────────────────────────────
 
     pub struct SegmentEncoderInner {
         config: EncoderConfig,
 
-        video_encoder: encoder::video::Video,
-        scaler: software::scaling::Context,
+        video_ctx: CodecCtxGuard,
+        sws_ctx: SwsCtxGuard,
         video_frame_count: u64,
         current_video_packets: Vec<EncodedPacket>,
         pub video_params: VideoCodecParams,
 
-        audio_encoder: encoder::audio::Audio,
+        audio_ctx: CodecCtxGuard,
         /// Accumulates interleaved f32 PCM samples until we have a full encoder frame.
         audio_sample_buf: Vec<f32>,
         audio_frame_size: usize,
@@ -87,100 +159,97 @@ mod imp {
 
     impl SegmentEncoderInner {
         pub fn new(config: &EncoderConfig) -> Result<Self> {
-            ffmpeg::init().context("ffmpeg init failed")?;
+            unsafe { Self::new_unsafe(config) }
+        }
 
-            // ── Video encoder ────────────────────────────────────────────────
-            let video_codec = encoder::find_by_name("h264_nvenc")
-                .or_else(|| encoder::find_by_name("libx264"))
-                .context("No H.264 encoder found (tried h264_nvenc and libx264)")?;
-
-            let video_ctx = codec::context::Context::new();
-            let mut video = video_ctx.encoder().video()?;
-            video.set_width(config.width);
-            video.set_height(config.height);
-            video.set_format(Pixel::NV12);
-            video.set_time_base(Rational::new(1, config.fps as i32));
-            video.set_frame_rate(Some(Rational::new(config.fps as i32, 1)));
-            video.set_bit_rate(config.video_bitrate as usize);
-
-            // Force IDR every fps frames (= 1 second), no B-frames.
-            // AV_CODEC_FLAG_GLOBAL_HEADER puts SPS+PPS in extradata (needed for MP4).
-            unsafe {
-                let p = video.as_mut_ptr();
-                (*p).gop_size = config.fps as i32;
-                (*p).max_b_frames = 0;
-                (*p).flags |= ffmpeg_next::sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
-            }
-
-            let mut opts = ffmpeg::Dictionary::new();
-            opts.set("preset", "p4");
-            opts.set("tune", "ull");
-            opts.set("rc", "vbr");
-
-            let video_encoder = video.open_as_with(video_codec, opts)
-                .context("Failed to open H.264 encoder")?;
-
-            let video_extradata = unsafe {
-                let p = video_encoder.as_ptr();
-                if (*p).extradata.is_null() || (*p).extradata_size == 0 {
-                    vec![]
+        unsafe fn new_unsafe(config: &EncoderConfig) -> Result<Self> {
+            // ── Video encoder ─────────────────────────────────────────────────
+            let video_codec = {
+                let nvenc = ffsys::avcodec_find_encoder_by_name(b"h264_nvenc\0".as_ptr() as _);
+                if !nvenc.is_null() {
+                    nvenc
                 } else {
-                    std::slice::from_raw_parts((*p).extradata, (*p).extradata_size as usize).to_vec()
+                    ffsys::avcodec_find_encoder_by_name(b"libx264\0".as_ptr() as _)
                 }
             };
+            if video_codec.is_null() {
+                bail!("No H.264 encoder found (tried h264_nvenc and libx264)");
+            }
+
+            let video_ctx = CodecCtxGuard(ffsys::avcodec_alloc_context3(video_codec));
+            if video_ctx.0.is_null() {
+                bail!("avcodec_alloc_context3 failed for video encoder");
+            }
+
+            (*video_ctx.0).width       = config.width as i32;
+            (*video_ctx.0).height      = config.height as i32;
+            (*video_ctx.0).pix_fmt     = ffsys::AVPixelFormat::AV_PIX_FMT_NV12;
+            (*video_ctx.0).time_base   = ffsys::AVRational { num: 1, den: config.fps as i32 };
+            (*video_ctx.0).framerate   = ffsys::AVRational { num: config.fps as i32, den: 1 };
+            (*video_ctx.0).bit_rate    = config.video_bitrate;
+            (*video_ctx.0).gop_size    = config.fps as i32; // one IDR per second
+            (*video_ctx.0).max_b_frames = 0;
+            // AV_CODEC_FLAG_GLOBAL_HEADER: put SPS+PPS in extradata (required for MP4).
+            (*video_ctx.0).flags      |= ffsys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
+
+            let mut opts: *mut ffsys::AVDictionary = ptr::null_mut();
+            ffsys::av_dict_set(&mut opts, b"preset\0".as_ptr() as _, b"p4\0".as_ptr() as _, 0);
+            ffsys::av_dict_set(&mut opts, b"tune\0".as_ptr() as _,   b"ull\0".as_ptr() as _, 0);
+            ffsys::av_dict_set(&mut opts, b"rc\0".as_ptr() as _,     b"vbr\0".as_ptr() as _, 0);
+            let ret = ffsys::avcodec_open2(video_ctx.0, video_codec, &mut opts);
+            ffsys::av_dict_free(&mut opts);
+            if ret < 0 {
+                bail!("Failed to open H.264 encoder (code {ret})");
+            }
 
             let video_params = VideoCodecParams {
-                extradata: video_extradata,
+                extradata: read_extradata(video_ctx.0),
                 width: config.width,
                 height: config.height,
                 fps: config.fps,
                 time_base: (1, config.fps as i32),
             };
 
-            let scaler = software::scaling::Context::get(
-                Pixel::BGRA,
-                config.width,
-                config.height,
-                Pixel::NV12,
-                config.width,
-                config.height,
-                Flags::BILINEAR,
-            ).context("Failed to create BGRA→NV12 scaler")?;
-
-            // ── Audio encoder ────────────────────────────────────────────────
-            let audio_codec = encoder::find(codec::Id::AAC)
-                .context("AAC encoder not found")?;
-
-            let audio_ctx = codec::context::Context::new();
-            let mut audio = audio_ctx.encoder().audio()?;
-            audio.set_rate(config.sample_rate as i32);
-            audio.set_channel_layout(ffmpeg_next::channel_layout::ChannelLayout::STEREO);
-            audio.set_format(
-                format::Sample::F32(format::sample::Type::Planar)
-            );
-            audio.set_bit_rate(config.audio_bitrate as usize);
-
-            unsafe {
-                let p = audio.as_mut_ptr();
-                (*p).flags |= ffmpeg_next::sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
+            // ── Scaler: BGRA → NV12 ───────────────────────────────────────────
+            let sws_ctx = SwsCtxGuard(ffsys::sws_getContext(
+                config.width as i32,  config.height as i32, ffsys::AVPixelFormat::AV_PIX_FMT_BGRA,
+                config.width as i32,  config.height as i32, ffsys::AVPixelFormat::AV_PIX_FMT_NV12,
+                ffsys::SWS_BILINEAR as i32,
+                ptr::null_mut(), ptr::null_mut(), ptr::null(),
+            ));
+            if sws_ctx.0.is_null() {
+                bail!("sws_getContext failed (BGRA→NV12)");
             }
 
-            let audio_encoder = audio.open_as(audio_codec)
-                .context("Failed to open AAC encoder")?;
+            // ── Audio encoder ─────────────────────────────────────────────────
+            let audio_codec = ffsys::avcodec_find_encoder(ffsys::AVCodecID::AV_CODEC_ID_AAC);
+            if audio_codec.is_null() {
+                bail!("AAC encoder not found");
+            }
 
-            let audio_frame_size = audio_encoder.frame_size() as usize;
+            let audio_ctx = CodecCtxGuard(ffsys::avcodec_alloc_context3(audio_codec));
+            if audio_ctx.0.is_null() {
+                bail!("avcodec_alloc_context3 failed for audio encoder");
+            }
 
-            let audio_extradata = unsafe {
-                let p = audio_encoder.as_ptr();
-                if (*p).extradata.is_null() || (*p).extradata_size == 0 {
-                    vec![]
-                } else {
-                    std::slice::from_raw_parts((*p).extradata, (*p).extradata_size as usize).to_vec()
-                }
-            };
+            (*audio_ctx.0).sample_rate = config.sample_rate as i32;
+            (*audio_ctx.0).sample_fmt  = ffsys::AVSampleFormat::AV_SAMPLE_FMT_FLTP;
+            (*audio_ctx.0).bit_rate    = config.audio_bitrate;
+            // FFmpeg 7.x channel layout API (replaces deprecated uint64 mask field).
+            (*audio_ctx.0).ch_layout.order       = ffsys::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE;
+            (*audio_ctx.0).ch_layout.nb_channels = 2;
+            (*audio_ctx.0).ch_layout.u.mask      = 0x3; // AV_CH_LAYOUT_STEREO
+            (*audio_ctx.0).flags |= ffsys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
 
+            let mut opts: *mut ffsys::AVDictionary = ptr::null_mut();
+            let ret = ffsys::avcodec_open2(audio_ctx.0, audio_codec, &mut opts);
+            if ret < 0 {
+                bail!("Failed to open AAC encoder (code {ret})");
+            }
+
+            let audio_frame_size = (*audio_ctx.0).frame_size as usize;
             let audio_params = AudioCodecParams {
-                extradata: audio_extradata,
+                extradata: read_extradata(audio_ctx.0),
                 sample_rate: config.sample_rate,
                 channels: config.channels as u32,
                 time_base: (1, config.sample_rate as i32),
@@ -188,12 +257,12 @@ mod imp {
 
             Ok(Self {
                 config: config.clone(),
-                video_encoder,
-                scaler,
+                video_ctx,
+                sws_ctx,
                 video_frame_count: 0,
                 current_video_packets: vec![],
                 video_params,
-                audio_encoder,
+                audio_ctx,
                 audio_sample_buf: Vec::new(),
                 audio_frame_size,
                 audio_pts: 0,
@@ -203,71 +272,94 @@ mod imp {
             })
         }
 
-        /// Encodes one BGRA video frame.  Returns `Some(segment)` when a complete
-        /// 1-second segment boundary is crossed (i.e. a new IDR frame is emitted).
+        /// Encodes one BGRA video frame. Returns `Some(segment)` when a complete
+        /// 1-second segment boundary is crossed (a new IDR frame is emitted).
         pub fn push_video_frame(&mut self, frame: &RawFrame) -> Result<Option<EncodedSegment>> {
-            // Build BGRA input frame with stride-aware row copy.
-            let mut bgra_frame = frame::Video::new(
-                Pixel::BGRA,
-                self.config.width,
-                self.config.height,
-            );
-            let stride = bgra_frame.stride(0);
+            unsafe { self.push_video_frame_unsafe(frame) }
+        }
+
+        unsafe fn push_video_frame_unsafe(
+            &mut self,
+            frame: &RawFrame,
+        ) -> Result<Option<EncodedSegment>> {
+            // Allocate and fill the BGRA source frame.
+            let bgra = FrameGuard(ffsys::av_frame_alloc());
+            if bgra.0.is_null() { bail!("av_frame_alloc failed (bgra)"); }
+            (*bgra.0).format = ffsys::AVPixelFormat::AV_PIX_FMT_BGRA as i32;
+            (*bgra.0).width  = self.config.width as i32;
+            (*bgra.0).height = self.config.height as i32;
+            let ret = ffsys::av_frame_get_buffer(bgra.0, 0);
+            if ret < 0 { bail!("av_frame_get_buffer(bgra) failed: {ret}"); }
+
+            let stride    = (*bgra.0).linesize[0] as usize;
             let row_bytes = self.config.width as usize * 4;
-            for row in 0..self.config.height as usize {
+            let height    = self.config.height as usize;
+            let dst = std::slice::from_raw_parts_mut((*bgra.0).data[0], stride * height);
+            for row in 0..height {
                 let src = &frame.bgra_data[row * row_bytes..(row + 1) * row_bytes];
-                let dst_start = row * stride;
-                bgra_frame.data_mut(0)[dst_start..dst_start + row_bytes].copy_from_slice(src);
+                dst[row * stride..row * stride + row_bytes].copy_from_slice(src);
             }
 
-            // Convert BGRA → NV12.
-            let mut nv12_frame = frame::Video::new(
-                Pixel::NV12,
-                self.config.width,
-                self.config.height,
-            );
-            self.scaler.run(&bgra_frame, &mut nv12_frame)?;
+            // Allocate the NV12 destination frame.
+            let nv12 = FrameGuard(ffsys::av_frame_alloc());
+            if nv12.0.is_null() { bail!("av_frame_alloc failed (nv12)"); }
+            (*nv12.0).format = ffsys::AVPixelFormat::AV_PIX_FMT_NV12 as i32;
+            (*nv12.0).width  = self.config.width as i32;
+            (*nv12.0).height = self.config.height as i32;
+            let ret = ffsys::av_frame_get_buffer(nv12.0, 0);
+            if ret < 0 { bail!("av_frame_get_buffer(nv12) failed: {ret}"); }
 
-            nv12_frame.set_pts(Some(self.video_frame_count as i64));
+            // Scale BGRA → NV12.
+            ffsys::sws_scale(
+                self.sws_ctx.0,
+                (*bgra.0).data.as_ptr() as *const *const u8,
+                (*bgra.0).linesize.as_ptr(),
+                0, self.config.height as i32,
+                (*nv12.0).data.as_mut_ptr(),
+                (*nv12.0).linesize.as_ptr(),
+            );
+
+            (*nv12.0).pts = self.video_frame_count as i64;
             self.video_frame_count += 1;
 
-            // Send to NVENC / libx264.
-            self.video_encoder.send_frame(&nv12_frame)?;
+            let ret = ffsys::avcodec_send_frame(self.video_ctx.0, nv12.0);
+            if ret < 0 { bail!("avcodec_send_frame(video) failed: {ret}"); }
 
-            // Drain output packets.
-            let mut new_segment: Option<EncodedSegment> = None;
-            let mut pkt = Packet::empty();
-            while self.video_encoder.receive_packet(&mut pkt).is_ok() {
-                let encoded = packet_to_encoded(&pkt);
-                let is_key = encoded.is_key;
+            // Drain encoded packets; detect IDR boundaries.
+            let prev_len = self.current_video_packets.len();
+            drain_packets(self.video_ctx.0, &mut self.current_video_packets);
 
-                // A new IDR packet (and we already have data) = segment boundary.
-                if is_key && !self.current_video_packets.is_empty() {
+            let mut new_segment = None;
+            // If a new IDR arrived and there was already data, split a segment.
+            // The IDR is the first packet appended after prev_len.
+            if let Some(first_new) = self.current_video_packets.get(prev_len) {
+                if first_new.is_key && prev_len > 0 {
+                    let new_video = self.current_video_packets.split_off(prev_len);
                     new_segment = Some(EncodedSegment {
                         index: self.segment_index,
-                        video_packets: std::mem::take(&mut self.current_video_packets),
+                        video_packets: std::mem::replace(&mut self.current_video_packets, new_video),
                         audio_packets: std::mem::take(&mut self.current_audio_packets),
                         video_time_base: self.video_params.time_base,
                         audio_time_base: self.audio_params.time_base,
                     });
                     self.segment_index += 1;
                 }
-
-                self.current_video_packets.push(encoded);
-                pkt = Packet::empty();
             }
 
             Ok(new_segment)
         }
 
         /// Feeds raw interleaved PCM audio into the AAC encoder.
-        /// Handles arbitrary chunk sizes by buffering internally until a full
-        /// encoder frame (typically 1024 samples) is available.
+        /// Buffers internally until a full encoder frame is available.
         pub fn push_audio(&mut self, audio: &RawAudio) -> Result<()> {
+            unsafe { self.push_audio_unsafe(audio) }
+        }
+
+        unsafe fn push_audio_unsafe(&mut self, audio: &RawAudio) -> Result<()> {
             self.audio_sample_buf.extend_from_slice(&audio.samples_f32);
 
-            let channels = self.config.channels as usize;
-            let samples_per_frame = self.audio_frame_size; // mono samples per channel
+            let channels             = self.config.channels as usize;
+            let samples_per_frame    = self.audio_frame_size;
             let interleaved_per_frame = samples_per_frame * channels;
 
             while self.audio_sample_buf.len() >= interleaved_per_frame {
@@ -275,50 +367,54 @@ mod imp {
                     .drain(..interleaved_per_frame)
                     .collect();
 
-                let mut audio_frame = frame::Audio::new(
-                    format::Sample::F32(format::sample::Type::Planar),
-                    samples_per_frame,
-                    ffmpeg_next::channel_layout::ChannelLayout::STEREO,
+                let af = FrameGuard(ffsys::av_frame_alloc());
+                if af.0.is_null() { bail!("av_frame_alloc failed (audio)"); }
+                (*af.0).format     = ffsys::AVSampleFormat::AV_SAMPLE_FMT_FLTP as i32;
+                (*af.0).nb_samples = samples_per_frame as i32;
+                (*af.0).pts        = self.audio_pts;
+                self.audio_pts    += samples_per_frame as i64;
+
+                // Copy channel layout from the codec context.
+                let ret = ffsys::av_channel_layout_copy(
+                    &mut (*af.0).ch_layout,
+                    &(*self.audio_ctx.0).ch_layout,
                 );
-                audio_frame.set_pts(Some(self.audio_pts));
-                self.audio_pts += samples_per_frame as i64;
+                if ret < 0 { bail!("av_channel_layout_copy failed: {ret}"); }
 
-                // De-interleave: chunk = [L0, R0, L1, R1, ...] → plane 0=L, plane 1=R
-                let left: Vec<f32> = chunk.iter().step_by(2).copied().collect();
+                let ret = ffsys::av_frame_get_buffer(af.0, 0);
+                if ret < 0 { bail!("av_frame_get_buffer(audio) failed: {ret}"); }
+
+                // De-interleave: [L0,R0,L1,R1,…] → plane 0 = L, plane 1 = R.
+                let left:  Vec<f32> = chunk.iter().step_by(2).copied().collect();
                 let right: Vec<f32> = chunk.iter().skip(1).step_by(2).copied().collect();
-                let left_bytes = bytemuck_f32_slice(&left);
-                let right_bytes = bytemuck_f32_slice(&right);
-                audio_frame.data_mut(0)[..left_bytes.len()].copy_from_slice(left_bytes);
-                audio_frame.data_mut(1)[..right_bytes.len()].copy_from_slice(right_bytes);
+                let lb = f32_as_u8(&left);
+                let rb = f32_as_u8(&right);
+                std::slice::from_raw_parts_mut((*af.0).data[0] as *mut u8, lb.len())
+                    .copy_from_slice(lb);
+                std::slice::from_raw_parts_mut((*af.0).data[1] as *mut u8, rb.len())
+                    .copy_from_slice(rb);
 
-                self.audio_encoder.send_frame(&audio_frame)?;
+                let ret = ffsys::avcodec_send_frame(self.audio_ctx.0, af.0);
+                if ret < 0 { bail!("avcodec_send_frame(audio) failed: {ret}"); }
 
-                let mut pkt = Packet::empty();
-                while self.audio_encoder.receive_packet(&mut pkt).is_ok() {
-                    self.current_audio_packets.push(packet_to_encoded(&pkt));
-                    pkt = Packet::empty();
-                }
+                drain_packets(self.audio_ctx.0, &mut self.current_audio_packets);
             }
 
             Ok(())
         }
 
-        /// Flushes any remaining buffered packets as a final partial segment.
-        /// Call this when the recording session ends.
+        /// Flushes remaining buffered packets as a final partial segment.
         pub fn flush(&mut self) -> Result<Option<EncodedSegment>> {
-            self.video_encoder.send_eof()?;
-            let mut pkt = Packet::empty();
-            while self.video_encoder.receive_packet(&mut pkt).is_ok() {
-                self.current_video_packets.push(packet_to_encoded(&pkt));
-                pkt = Packet::empty();
-            }
+            unsafe { self.flush_unsafe() }
+        }
 
-            self.audio_encoder.send_eof()?;
-            let mut pkt = Packet::empty();
-            while self.audio_encoder.receive_packet(&mut pkt).is_ok() {
-                self.current_audio_packets.push(packet_to_encoded(&pkt));
-                pkt = Packet::empty();
-            }
+        unsafe fn flush_unsafe(&mut self) -> Result<Option<EncodedSegment>> {
+            // Signal EOF to both encoders.
+            ffsys::avcodec_send_frame(self.video_ctx.0, ptr::null());
+            drain_packets(self.video_ctx.0, &mut self.current_video_packets);
+
+            ffsys::avcodec_send_frame(self.audio_ctx.0, ptr::null());
+            drain_packets(self.audio_ctx.0, &mut self.current_audio_packets);
 
             if self.current_video_packets.is_empty() && self.current_audio_packets.is_empty() {
                 return Ok(None);
@@ -333,20 +429,13 @@ mod imp {
             }))
         }
     }
-
-    /// Reinterpret a `&[f32]` as `&[u8]`.
-    fn bytemuck_f32_slice(s: &[f32]) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4)
-        }
-    }
 }
 
 // ── Public SegmentEncoder (platform-dispatched) ───────────────────────────────
 
 /// Encodes raw video and audio into 1-second [`EncodedSegment`]s.
 ///
-/// On Windows, backed by NVENC H.264 + AAC via `ffmpeg-next`.
+/// On Windows, backed by NVENC H.264 + AAC via `ffmpeg-sys-next`.
 /// On other platforms, all methods compile but return `Ok(None)` / `Ok(())`.
 #[cfg(windows)]
 pub struct SegmentEncoder {
