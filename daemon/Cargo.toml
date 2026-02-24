@@ -13,13 +13,12 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 
 # Windows-only: screen capture (WGC), audio capture (WASAPI), and hardware encoding (NVENC).
-# On Windows the user must set FFMPEG_DIR to a pre-built FFmpeg 6.x dev tree that includes
-# NVENC support (e.g. the GPL build from https://www.gyan.dev/ffmpeg/builds/).
+# FFMPEG_DIR must point to a static FFmpeg 7.x build (set by scripts/Setup-Ffmpeg.ps1 via vcpkg).
 [dev-dependencies]
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-ffmpeg-next = "6"
+ffmpeg-next = "7"
 windows = { version = "0.57", features = [
     # WinRT / WGC
     "Foundation",

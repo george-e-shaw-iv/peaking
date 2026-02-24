@@ -276,7 +276,7 @@ mod imp {
 
     /// Sets the channel layout on `par` for the given number of channels.
     ///
-    /// FFmpeg 6.x uses `AVChannelLayout` in `AVCodecParameters`.
+    /// FFmpeg uses `AVChannelLayout` in `AVCodecParameters`.
     /// For AAC the `extradata` (AudioSpecificConfig) carries the full channel
     /// description, so setting `nb_channels` is sufficient for the muxer.
     unsafe fn set_channel_layout(par: *mut ffsys::AVCodecParameters, channels: u32) {

@@ -2,9 +2,8 @@
 /// 1-second [`EncodedSegment`]s using NVENC H.264 (with libx264 fallback) and AAC.
 ///
 /// # Windows build requirements
-/// Set the `FFMPEG_DIR` environment variable to a pre-built FFmpeg 6.x dev tree
-/// (headers + import libs) that includes NVENC support before running `cargo build`.
-/// Pre-built Windows binaries are available at <https://www.gyan.dev/ffmpeg/builds/>.
+/// Set the `FFMPEG_DIR` environment variable to a static FFmpeg 7.x build with NVENC support
+/// before running `cargo build`. Run `scripts/Setup-Ffmpeg.ps1` to set this up via vcpkg.
 use anyhow::Result;
 
 use crate::capture::RawFrame;
