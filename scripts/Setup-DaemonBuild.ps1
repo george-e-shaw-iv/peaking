@@ -1,14 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Idempotently sets up a static FFmpeg build and LLVM for compiling peaking-daemon.
+    Idempotently sets up the full build environment for compiling peaking-daemon.
 
 .DESCRIPTION
     - Installs LLVM via winget (if not already present) — required by bindgen
     - Clones vcpkg to C:\vcpkg (if not already present)
     - Bootstraps vcpkg (if not already done)
     - Installs ffmpeg:x64-windows-static with NVENC support (if not already installed)
-    - Sets FFMPEG_DIR, FFMPEG_STATIC, and LIBCLANG_PATH as persistent user environment variables
+    - Creates a stub avfft.h (removed in FFmpeg 7.0, still referenced by ffmpeg-sys-next)
+    - Sets FFMPEG_DIR, FFMPEG_STATIC, LIBCLANG_PATH, and BINDGEN_EXTRA_CLANG_ARGS as persistent user environment variables
 
     Safe to run multiple times; each step is skipped if already complete.
 
@@ -113,13 +114,46 @@ if (Test-Path $InstallMarker) {
     if ($LASTEXITCODE -ne 0) { throw "vcpkg install exited with code $LASTEXITCODE" }
 }
 
+# ── avfft.h stub ───────────────────────────────────────────────────────────────
+#
+# avfft.h was removed in FFmpeg 7.0 but ffmpeg-sys-next still tries to bind it.
+# An empty stub satisfies bindgen without introducing any linker symbols.
+
+Write-Step 'avfft.h stub'
+
+$AvfftHeader = Join-Path $FfmpegDir 'include\libavcodec\avfft.h'
+
+if (Test-Path $AvfftHeader) {
+    Write-Skip 'avfft.h already present'
+} else {
+    Write-Host '    Creating avfft.h stub ...'
+    $stub = @'
+/* avfft.h - compatibility stub
+ * This header was deprecated in FFmpeg 5.0 and removed in FFmpeg 7.0.
+ * This stub exists solely to allow ffmpeg-sys-next to complete bindgen
+ * without errors. No API is exposed and no linker symbols are required.
+ */
+#ifndef AVCODEC_AVFFT_H
+#define AVCODEC_AVFFT_H
+
+#endif /* AVCODEC_AVFFT_H */
+'@
+    Set-Content -Path $AvfftHeader -Value $stub -Encoding UTF8
+    Write-Host "    Created $AvfftHeader"
+}
+
 # ── Environment variables ──────────────────────────────────────────────────────
 
 Write-Step 'Environment variables'
 
-$currentDir       = [System.Environment]::GetEnvironmentVariable('FFMPEG_DIR',      'User')
-$currentStatic    = [System.Environment]::GetEnvironmentVariable('FFMPEG_STATIC',   'User')
-$currentLibclang  = [System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH',   'User')
+# Forward-slash path for clang -I (clang handles forward slashes on Windows)
+$FfmpegInclude    = ($FfmpegDir -replace '\\', '/') + '/include'
+$BindgenArgs      = "-I$FfmpegInclude"
+
+$currentDir        = [System.Environment]::GetEnvironmentVariable('FFMPEG_DIR',               'User')
+$currentStatic     = [System.Environment]::GetEnvironmentVariable('FFMPEG_STATIC',            'User')
+$currentLibclang   = [System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH',            'User')
+$currentBindgen    = [System.Environment]::GetEnvironmentVariable('BINDGEN_EXTRA_CLANG_ARGS', 'User')
 
 if ($currentDir -eq $FfmpegDir) {
     Write-Skip "FFMPEG_DIR already set to $FfmpegDir"
@@ -142,11 +176,19 @@ if ($currentLibclang -eq $LlvmBinDir) {
     Write-Host "    LIBCLANG_PATH = $LlvmBinDir"
 }
 
+if ($currentBindgen -eq $BindgenArgs) {
+    Write-Skip "BINDGEN_EXTRA_CLANG_ARGS already set"
+} else {
+    [System.Environment]::SetEnvironmentVariable('BINDGEN_EXTRA_CLANG_ARGS', $BindgenArgs, 'User')
+    Write-Host "    BINDGEN_EXTRA_CLANG_ARGS = $BindgenArgs"
+}
+
 # Also apply to the current session so the user can build immediately
 # without opening a new terminal (though a new terminal is cleaner)
-$env:FFMPEG_DIR    = $FfmpegDir
-$env:FFMPEG_STATIC = '1'
-$env:LIBCLANG_PATH = $LlvmBinDir
+$env:FFMPEG_DIR               = $FfmpegDir
+$env:FFMPEG_STATIC            = '1'
+$env:LIBCLANG_PATH            = $LlvmBinDir
+$env:BINDGEN_EXTRA_CLANG_ARGS = $BindgenArgs
 
 # ── Done ───────────────────────────────────────────────────────────────────────
 

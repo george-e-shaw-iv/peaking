@@ -58,7 +58,7 @@ Either component can run independently — the daemon works headlessly without t
 FFmpeg is statically linked into the daemon binary — no FFmpeg DLLs are needed at runtime. A setup script handles fetching and compiling a static FFmpeg via vcpkg, and setting the required environment variables. Run it once from PowerShell:
 
 ```powershell
-.\scripts\Setup-Ffmpeg.ps1
+.\scripts\Setup-DaemonBuild.ps1
 ```
 
 If Visual Studio is installed but missing the C++ workload, add it first:
