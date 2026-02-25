@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import Settings from '../pages/Settings'
 import type { Config, AppConfig } from '../types/config'
@@ -33,6 +33,7 @@ describe('Settings', () => {
   it('renders the settings heading', async () => {
     render(<Settings />)
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
+    await screen.findByLabelText('Buffer length') // flush async readConfig state update
   })
 
   it('loads and displays default config values after mount', async () => {
@@ -49,23 +50,14 @@ describe('Settings', () => {
     render(<Settings />)
     await waitFor(() => expect(screen.getByLabelText('Buffer length')).toBeInTheDocument())
     const slider = screen.getByLabelText('Buffer length')
-    fireSliderChange(slider, '45')
+    act(() => { fireSliderChange(slider, '45') })
     expect(screen.getByText('45s')).toBeInTheDocument()
   })
 
-  it('does not call writeConfig before Save is clicked', async () => {
+  it('calls writeConfig immediately when hotkey is changed', async () => {
     render(<Settings />)
     await waitFor(() => expect(screen.getByLabelText('Hotkey')).toBeInTheDocument())
     await userEvent.setup().selectOptions(screen.getByLabelText('Hotkey'), 'F12')
-    expect(mockElectronAPI.writeConfig).not.toHaveBeenCalled()
-  })
-
-  it('calls writeConfig with updated values when Save is clicked', async () => {
-    const user = userEvent.setup()
-    render(<Settings />)
-    await waitFor(() => expect(screen.getByLabelText('Hotkey')).toBeInTheDocument())
-    await user.selectOptions(screen.getByLabelText('Hotkey'), 'F12')
-    await user.click(screen.getByRole('button', { name: 'Save Settings' }))
     expect(mockElectronAPI.writeConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         global: expect.objectContaining({ hotkey: 'F12' })
@@ -73,12 +65,24 @@ describe('Settings', () => {
     )
   })
 
-  it('shows Saved! feedback after successful save', async () => {
+  it('calls writeConfig with correct values on auto-save', async () => {
     const user = userEvent.setup()
     render(<Settings />)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Save Settings' })).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: 'Save Settings' }))
-    expect(await screen.findByText('Saved!')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('Hotkey')).toBeInTheDocument())
+    await user.selectOptions(screen.getByLabelText('Hotkey'), 'F12')
+    expect(mockElectronAPI.writeConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        global: expect.objectContaining({ hotkey: 'F12' })
+      })
+    )
+  })
+
+  it('shows Settings saved feedback after auto-save', async () => {
+    const user = userEvent.setup()
+    render(<Settings />)
+    await waitFor(() => expect(screen.getByLabelText('Hotkey')).toBeInTheDocument())
+    await user.selectOptions(screen.getByLabelText('Hotkey'), 'F12')
+    expect(await screen.findByText('Settings saved')).toBeInTheDocument()
   })
 
   it('calls openDirectoryDialog when Browse is clicked and updates dir field', async () => {

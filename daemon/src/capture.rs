@@ -185,6 +185,9 @@ mod imp {
             }
         }))?;
 
+        // Disable the yellow capture border (requires Windows 11 22H2+; silently ignored on older builds).
+        let _ = session.SetIsBorderRequired(false);
+
         session.StartCapture()?;
         eprintln!("[capture] WGC session started ({}×{})", width, height);
 

@@ -104,7 +104,7 @@ export default function Status(): React.JSX.Element {
         </div>
 
         {/* Runtime status card */}
-        {status === null ? (
+        {!running || status === null ? (
           <div className="bg-gray-800 rounded-lg p-6">
             <p className="text-sm text-gray-400">
               No status available. Start the daemon to begin.

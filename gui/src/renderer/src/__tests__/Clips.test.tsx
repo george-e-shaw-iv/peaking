@@ -47,14 +47,16 @@ beforeEach(() => {
 })
 
 describe('Clips', () => {
-  it('renders the clips heading', () => {
+  it('renders the clips heading', async () => {
     render(<Clips />)
     expect(screen.getByRole('heading', { name: 'Clips' })).toBeInTheDocument()
+    await screen.findByText('Rocket League') // flush async discoverClips state update
   })
 
-  it('shows scanning message while loading', () => {
+  it('shows scanning message while loading', async () => {
     render(<Clips />)
     expect(screen.getByText('Scanning for clips…')).toBeInTheDocument()
+    await screen.findByText('Rocket League') // flush async discoverClips state update
   })
 
   it('displays game group names after loading', async () => {

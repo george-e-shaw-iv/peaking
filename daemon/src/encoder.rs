@@ -496,8 +496,6 @@ impl SegmentEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::RawFrame;
-    use crate::audio_capture::RawAudio;
 
     // ── EncoderConfig defaults ─────────────────────────────────────────────────
 

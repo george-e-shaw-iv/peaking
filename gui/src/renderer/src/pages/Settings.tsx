@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { FolderOpen, PlusCircle } from 'lucide-react'
 import type { Config, GlobalConfig, AppConfig } from '../types/config'
 import { DEFAULT_CONFIG, HOTKEY_OPTIONS, BUFFER_MIN, BUFFER_MAX } from '../types/config'
@@ -9,6 +9,7 @@ export default function Settings(): React.JSX.Element {
   const [apps, setApps] = useState<AppConfig[]>(DEFAULT_CONFIG.applications)
   const [loaded, setLoaded] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     window.electronAPI.readConfig().then((config) => {
@@ -23,21 +24,24 @@ export default function Settings(): React.JSX.Element {
     await window.electronAPI.writeConfig(config)
   }
 
-  async function handleSaveGlobal(): Promise<void> {
+  async function saveGlobal(updatedGlobal: GlobalConfig): Promise<void> {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     try {
-      await writeConfig(global, apps)
+      await writeConfig(updatedGlobal, apps)
       setSaveStatus('saved')
-      setTimeout(() => setSaveStatus('idle'), 2000)
+      saveTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000)
     } catch {
       setSaveStatus('error')
-      setTimeout(() => setSaveStatus('idle'), 3000)
+      saveTimerRef.current = setTimeout(() => setSaveStatus('idle'), 3000)
     }
   }
 
   async function handleBrowseDir(): Promise<void> {
     const dir = await window.electronAPI.openDirectoryDialog()
     if (dir !== null) {
-      setGlobal((g) => ({ ...g, clip_output_dir: dir }))
+      const updated = { ...global, clip_output_dir: dir }
+      setGlobal(updated)
+      await saveGlobal(updated)
     }
   }
 
@@ -90,6 +94,10 @@ export default function Settings(): React.JSX.Element {
               max={BUFFER_MAX}
               value={global.buffer_length_secs}
               onChange={(e) => setGlobal((g) => ({ ...g, buffer_length_secs: Number(e.target.value) }))}
+              onMouseUp={(e) => {
+                const v = Number((e.target as HTMLInputElement).value)
+                saveGlobal({ ...global, buffer_length_secs: v })
+              }}
               className="w-full accent-blue-500"
               aria-label="Buffer length"
             />
@@ -103,7 +111,11 @@ export default function Settings(): React.JSX.Element {
             <label className="block text-sm font-medium text-gray-300 mb-1">Hotkey</label>
             <select
               value={global.hotkey}
-              onChange={(e) => setGlobal((g) => ({ ...g, hotkey: e.target.value }))}
+              onChange={(e) => {
+                const v = e.target.value
+                setGlobal((g) => ({ ...g, hotkey: v }))
+                saveGlobal({ ...global, hotkey: v })
+              }}
               className="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               aria-label="Hotkey"
             >
@@ -120,6 +132,7 @@ export default function Settings(): React.JSX.Element {
                 type="text"
                 value={global.clip_output_dir}
                 onChange={(e) => setGlobal((g) => ({ ...g, clip_output_dir: e.target.value }))}
+                onBlur={(e) => saveGlobal({ ...global, clip_output_dir: e.target.value })}
                 className="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
                 aria-label="Clip output directory"
               />
@@ -132,21 +145,6 @@ export default function Settings(): React.JSX.Element {
                 Browse
               </button>
             </div>
-          </div>
-
-          <div className="flex items-center gap-3 pt-1">
-            <button
-              onClick={handleSaveGlobal}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium text-white transition-colors"
-            >
-              Save Settings
-            </button>
-            {saveStatus === 'saved' && (
-              <span className="text-sm text-green-400">Saved!</span>
-            )}
-            {saveStatus === 'error' && (
-              <span className="text-sm text-red-400">Failed to save.</span>
-            )}
           </div>
         </div>
 
@@ -182,6 +180,15 @@ export default function Settings(): React.JSX.Element {
           )}
         </div>
       </div>
+
+      {/* Ephemeral save toast */}
+      {saveStatus !== 'idle' && (
+        <div className={`fixed bottom-4 right-4 px-4 py-2 rounded shadow-lg text-sm font-medium transition-opacity ${
+          saveStatus === 'saved' ? 'bg-green-700 text-green-100' : 'bg-red-700 text-red-100'
+        }`}>
+          {saveStatus === 'saved' ? 'Settings saved' : 'Failed to save'}
+        </div>
+      )}
     </div>
   )
 }

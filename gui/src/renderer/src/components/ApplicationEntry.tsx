@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { ChevronDown, ChevronRight, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, FolderOpen, X } from 'lucide-react'
 import type { AppConfig } from '../types/config'
 import { HOTKEY_OPTIONS, BUFFER_MIN, BUFFER_MAX } from '../types/config'
 
@@ -41,6 +41,16 @@ export default function ApplicationEntry({ app, onChange, onRemove }: Applicatio
     onChange({ ...app, hotkey: value })
   }
 
+  async function handleChangeExecutable(): Promise<void> {
+    const result = await window.electronAPI.openExecutableDialog()
+    if (result === null) return
+    onChange({
+      ...app,
+      executable_name: result.executable_name,
+      executable_path: result.executable_path
+    })
+  }
+
   return (
     <div className="bg-gray-700 rounded-md">
       <div className="flex items-center gap-3 px-4 py-3">
@@ -74,6 +84,27 @@ export default function ApplicationEntry({ app, onChange, onRemove }: Applicatio
               onBlur={handleDisplayNameBlur}
               className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Executable Path</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={app.executable_path}
+                readOnly
+                className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-300 font-mono focus:outline-none cursor-default"
+                aria-label="Executable path"
+              />
+              <button
+                onClick={handleChangeExecutable}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-600 hover:bg-gray-500 border border-gray-500 rounded text-sm text-gray-300 hover:text-white transition-colors"
+                aria-label="Change executable"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Change
+              </button>
+            </div>
           </div>
 
           <div>
