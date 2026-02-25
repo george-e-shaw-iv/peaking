@@ -66,7 +66,7 @@ mod imp {
                 Some(data_bytes),
             )
         };
-        unsafe { RegCloseKey(hkey) };
+        unsafe { let _ = RegCloseKey(hkey); };
 
         if err != ERROR_SUCCESS {
             bail!("RegSetValueExW failed: {:?}", err);
@@ -99,7 +99,7 @@ mod imp {
         let err = unsafe {
             RegDeleteValueW(hkey, PCWSTR::from_raw(val_w.as_ptr()))
         };
-        unsafe { RegCloseKey(hkey) };
+        unsafe { let _ = RegCloseKey(hkey); };
 
         // ERROR_FILE_NOT_FOUND means the value was already absent — that's fine.
         if err != ERROR_SUCCESS && err.0 != 2 {

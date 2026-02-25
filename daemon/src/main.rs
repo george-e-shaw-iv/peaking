@@ -87,6 +87,8 @@ async fn main() {
 
     // ── Event loop ────────────────────────────────────────────────────────────
     let mut active_pipeline: Option<pipeline::Pipeline> = None;
+    // Tracks the currently-recording app so we can apply its hotkey/buffer overrides.
+    let mut active_app: Option<config::ApplicationConfig> = None;
 
     while let Some(evt) = event_rx.recv().await {
         match evt {
@@ -101,25 +103,30 @@ async fn main() {
                 current_status.error = None;
                 status::write_status(&status_path, &current_status);
 
+                let cfg = shared_config.read().await;
                 {
-                    let cfg = shared_config.read().await;
                     let mut rb = ring_buffer.lock().unwrap();
                     rb.clear();
                     rb.resize(app.effective_buffer_length(&cfg.global));
                 }
-
-                let cfg = shared_config.read().await;
+                hotkey_handle.update_key(app.effective_hotkey(&cfg.global));
                 active_pipeline = Some(pipeline::Pipeline::start(
                     &app,
                     &cfg,
                     Arc::clone(&ring_buffer),
                 ));
+                active_app = Some(app);
             }
 
             event::DaemonEvent::ProcessStopped => {
                 if let Some(p) = active_pipeline.take() {
                     p.stop().await;
                 }
+                active_app = None;
+
+                // Restore the global hotkey now that no per-app override is active.
+                let global_hotkey = shared_config.read().await.global.hotkey.clone();
+                hotkey_handle.update_key(&global_hotkey);
 
                 println!("Recording stopped");
                 current_status.state = status::DaemonState::Idle;
@@ -129,10 +136,19 @@ async fn main() {
 
             event::DaemonEvent::ConfigReloaded(new_config) => {
                 println!("Config reloaded");
-                hotkey_handle.update_key(&new_config.global.hotkey);
+                // Apply per-app overrides if a game is currently being recorded.
+                let effective_key = match &active_app {
+                    Some(app) => app.effective_hotkey(&new_config.global).to_string(),
+                    None => new_config.global.hotkey.clone(),
+                };
+                hotkey_handle.update_key(&effective_key);
                 {
+                    let new_capacity = match &active_app {
+                        Some(app) => app.effective_buffer_length(&new_config.global),
+                        None => new_config.global.buffer_length_secs,
+                    };
                     let mut rb = ring_buffer.lock().unwrap();
-                    rb.resize(new_config.global.buffer_length_secs);
+                    rb.resize(new_capacity);
                 }
                 *shared_config.write().await = new_config;
             }

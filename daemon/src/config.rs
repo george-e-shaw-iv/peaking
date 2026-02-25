@@ -63,8 +63,6 @@ pub struct ApplicationConfig {
     pub display_name: String,
     /// Executable filename (e.g. "RocketLeague.exe") used for process detection.
     pub executable_name: String,
-    /// Full path to the executable, stored for display purposes in the GUI.
-    pub executable_path: String,
     /// Overrides the global buffer length for this application (seconds).
     pub buffer_length_secs: Option<u32>,
     /// Overrides the global hotkey for this application.
@@ -179,7 +177,6 @@ mod tests {
         ApplicationConfig {
             display_name: "Test Game".to_string(),
             executable_name: "game.exe".to_string(),
-            executable_path: r"C:\Games\game.exe".to_string(),
             buffer_length_secs: buffer_override,
             hotkey: hotkey_override.map(|s| s.to_string()),
         }
@@ -290,7 +287,6 @@ clip_output_dir = "C:\\Clips"
 [[applications]]
 display_name = "Rocket League"
 executable_name = "RocketLeague.exe"
-executable_path = "C:\\Games\\RocketLeague.exe"
 "#,
         )
         .unwrap();
@@ -303,6 +299,7 @@ executable_path = "C:\\Games\\RocketLeague.exe"
         assert_eq!(config.applications[0].display_name, "Rocket League");
         assert_eq!(config.applications[0].executable_name, "RocketLeague.exe");
         assert!(config.applications[0].buffer_length_secs.is_none());
+        assert!(config.applications[0].hotkey.is_none());
     }
 
     #[test]
@@ -336,7 +333,6 @@ executable_path = "C:\\Games\\RocketLeague.exe"
 [[applications]]
 display_name = "Fortnite"
 executable_name = "FortniteClient-Win64-Shipping.exe"
-executable_path = "C:\\Fortnite\\FortniteClient.exe"
 buffer_length_secs = 30
 hotkey = "F7"
 "#,

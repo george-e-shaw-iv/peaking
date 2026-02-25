@@ -26,7 +26,6 @@ pub struct VideoCodecParams {
     pub extradata: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
     /// ffmpeg AVRational time base stored as (num, den).
     pub time_base: (i32, i32),
 }
@@ -46,12 +45,8 @@ pub struct AudioCodecParams {
 /// Each segment starts with an IDR (keyframe) so it is independently decodable.
 #[derive(Debug, Clone)]
 pub struct EncodedSegment {
-    /// Sequential segment number, 0-based from the start of the current recording session.
-    pub index: u64,
     pub video_packets: Vec<EncodedPacket>,
     pub audio_packets: Vec<EncodedPacket>,
-    pub video_time_base: (i32, i32),
-    pub audio_time_base: (i32, i32),
 }
 
 /// Circular buffer of 1-second [`EncodedSegment`]s.
@@ -88,23 +83,9 @@ impl RingBuffer {
         self.segments.push_back(segment);
     }
 
-    /// Drains all segments out of the buffer (consuming them) and returns them
-    /// in chronological order. Used by the flush operation (Phase 9).
-    pub fn take_all(&mut self) -> Vec<EncodedSegment> {
-        self.segments.drain(..).collect()
-    }
-
     /// Returns a slice view of all segments without removing them.
     pub fn segments(&self) -> &VecDeque<EncodedSegment> {
         &self.segments
-    }
-
-    pub fn len(&self) -> usize {
-        self.segments.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
     }
 
     /// Clears all segments (e.g. when a new recording session starts).
@@ -132,38 +113,43 @@ impl RingBuffer {
 mod tests {
     use super::*;
 
-    fn make_segment(index: u64) -> EncodedSegment {
+    fn make_segment(id: i64) -> EncodedSegment {
         EncodedSegment {
-            index,
-            video_packets: vec![],
+            video_packets: vec![EncodedPacket {
+                data: vec![],
+                pts: id,
+                dts: id,
+                duration: 1,
+                is_key: false,
+            }],
             audio_packets: vec![],
-            video_time_base: (1, 60),
-            audio_time_base: (1, 48_000),
         }
+    }
+
+    fn first_pts(seg: &EncodedSegment) -> i64 {
+        seg.video_packets[0].pts
     }
 
     // ── capacity clamping ─────────────────────────────────────────────────────
 
     #[test]
     fn new_clamps_below_min() {
-        // The simplest observable check: push more than MIN segments and the
-        // oldest should be evicted (capacity == MIN, not 1).
         let mut rb = RingBuffer::new(0);
         for i in 0..MIN_BUFFER_LENGTH_SECS + 1 {
-            rb.push(make_segment(i as u64));
+            rb.push(make_segment(i as i64));
         }
-        assert_eq!(rb.len(), MIN_BUFFER_LENGTH_SECS as usize);
-        assert_eq!(rb.segments().front().unwrap().index, 1);
+        assert_eq!(rb.segments().len(), MIN_BUFFER_LENGTH_SECS as usize);
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 1);
     }
 
     #[test]
     fn new_clamps_above_max() {
         let mut rb = RingBuffer::new(u32::MAX);
         for i in 0..MAX_BUFFER_LENGTH_SECS + 1 {
-            rb.push(make_segment(i as u64));
+            rb.push(make_segment(i as i64));
         }
-        assert_eq!(rb.len(), MAX_BUFFER_LENGTH_SECS as usize);
-        assert_eq!(rb.segments().front().unwrap().index, 1);
+        assert_eq!(rb.segments().len(), MAX_BUFFER_LENGTH_SECS as usize);
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 1);
     }
 
     #[test]
@@ -171,10 +157,10 @@ mod tests {
         let cap = 30u32;
         let mut rb = RingBuffer::new(cap);
         for i in 0..cap + 1 {
-            rb.push(make_segment(i as u64));
+            rb.push(make_segment(i as i64));
         }
-        assert_eq!(rb.len(), cap as usize);
-        assert_eq!(rb.segments().front().unwrap().index, 1);
+        assert_eq!(rb.segments().len(), cap as usize);
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 1);
     }
 
     // ── push / eviction ───────────────────────────────────────────────────────
@@ -184,63 +170,32 @@ mod tests {
         let cap = 10u32;
         let mut rb = RingBuffer::new(cap);
         for i in 0..cap * 2 {
-            rb.push(make_segment(i as u64));
+            rb.push(make_segment(i as i64));
         }
-        assert_eq!(rb.len(), cap as usize);
+        assert_eq!(rb.segments().len(), cap as usize);
     }
 
     #[test]
     fn push_evicts_oldest_segment() {
         let mut rb = RingBuffer::new(MIN_BUFFER_LENGTH_SECS);
         for i in 0..MIN_BUFFER_LENGTH_SECS + 3 {
-            rb.push(make_segment(i as u64));
+            rb.push(make_segment(i as i64));
         }
-        // The first 3 segments (indices 0, 1, 2) should have been evicted.
-        assert_eq!(rb.segments().front().unwrap().index, 3);
+        // The first 3 segments (ids 0, 1, 2) should have been evicted.
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 3);
         assert_eq!(
-            rb.segments().back().unwrap().index,
-            MIN_BUFFER_LENGTH_SECS as u64 + 2
+            first_pts(rb.segments().back().unwrap()),
+            (MIN_BUFFER_LENGTH_SECS + 2) as i64
         );
     }
 
     #[test]
     fn push_into_empty_buffer() {
         let mut rb = RingBuffer::new(10);
-        assert!(rb.is_empty());
+        assert!(rb.segments().is_empty());
         rb.push(make_segment(0));
-        assert_eq!(rb.len(), 1);
-        assert!(!rb.is_empty());
-    }
-
-    // ── take_all ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn take_all_returns_chronological_order() {
-        let mut rb = RingBuffer::new(10);
-        for i in 0..5u64 {
-            rb.push(make_segment(i));
-        }
-        let drained = rb.take_all();
-        assert_eq!(drained.len(), 5);
-        for (expected, seg) in drained.iter().enumerate() {
-            assert_eq!(seg.index, expected as u64);
-        }
-    }
-
-    #[test]
-    fn take_all_empties_buffer() {
-        let mut rb = RingBuffer::new(10);
-        rb.push(make_segment(0));
-        rb.push(make_segment(1));
-        let _ = rb.take_all();
-        assert!(rb.is_empty());
-    }
-
-    #[test]
-    fn take_all_on_empty_returns_empty_vec() {
-        let mut rb = RingBuffer::new(10);
-        let drained = rb.take_all();
-        assert!(drained.is_empty());
+        assert_eq!(rb.segments().len(), 1);
+        assert!(!rb.segments().is_empty());
     }
 
     // ── segments view ─────────────────────────────────────────────────────────
@@ -251,7 +206,7 @@ mod tests {
         rb.push(make_segment(0));
         rb.push(make_segment(1));
         let _ = rb.segments();
-        assert_eq!(rb.len(), 2);
+        assert_eq!(rb.segments().len(), 2);
     }
 
     // ── clear ─────────────────────────────────────────────────────────────────
@@ -263,8 +218,8 @@ mod tests {
             rb.push(make_segment(i));
         }
         rb.clear();
-        assert!(rb.is_empty());
-        assert_eq!(rb.len(), 0);
+        assert!(rb.segments().is_empty());
+        assert_eq!(rb.segments().len(), 0);
     }
 
     #[test]
@@ -273,8 +228,8 @@ mod tests {
         rb.push(make_segment(0));
         rb.clear();
         rb.push(make_segment(1));
-        assert_eq!(rb.len(), 1);
-        assert_eq!(rb.segments().front().unwrap().index, 1);
+        assert_eq!(rb.segments().len(), 1);
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 1);
     }
 
     // ── resize ────────────────────────────────────────────────────────────────
@@ -282,55 +237,55 @@ mod tests {
     #[test]
     fn resize_smaller_evicts_oldest() {
         let mut rb = RingBuffer::new(10);
-        for i in 0..10u64 {
+        for i in 0..10i64 {
             rb.push(make_segment(i));
         }
         rb.resize(7);
-        assert_eq!(rb.len(), 7);
+        assert_eq!(rb.segments().len(), 7);
         // Segments 0-2 should be gone; segment 3 is now the oldest.
-        assert_eq!(rb.segments().front().unwrap().index, 3);
+        assert_eq!(first_pts(rb.segments().front().unwrap()), 3);
     }
 
     #[test]
     fn resize_larger_does_not_add_segments() {
         let mut rb = RingBuffer::new(10);
-        for i in 0..5u64 {
+        for i in 0..5i64 {
             rb.push(make_segment(i));
         }
         rb.resize(20);
-        assert_eq!(rb.len(), 5);
+        assert_eq!(rb.segments().len(), 5);
     }
 
     #[test]
     fn resize_to_same_capacity_is_noop() {
         let mut rb = RingBuffer::new(10);
-        for i in 0..10u64 {
+        for i in 0..10i64 {
             rb.push(make_segment(i));
         }
         rb.resize(10);
-        assert_eq!(rb.len(), 10);
+        assert_eq!(rb.segments().len(), 10);
     }
 
     #[test]
     fn resize_clamps_below_min() {
         let mut rb = RingBuffer::new(10);
-        for i in 0..10u64 {
+        for i in 0..10i64 {
             rb.push(make_segment(i));
         }
         rb.resize(0);
         // Should be clamped to MIN, not 0.
-        assert_eq!(rb.len(), MIN_BUFFER_LENGTH_SECS as usize);
+        assert_eq!(rb.segments().len(), MIN_BUFFER_LENGTH_SECS as usize);
     }
 
     #[test]
     fn resize_clamps_above_max() {
         let mut rb = RingBuffer::new(10);
-        for i in 0..10u64 {
+        for i in 0..10i64 {
             rb.push(make_segment(i));
         }
         rb.resize(u32::MAX);
         // Capacity grows, but existing segments are kept.
-        assert_eq!(rb.len(), 10);
+        assert_eq!(rb.segments().len(), 10);
     }
 
     // ── codec params ──────────────────────────────────────────────────────────
@@ -349,7 +304,6 @@ mod tests {
             extradata: vec![0x01, 0x02],
             width: 1920,
             height: 1080,
-            fps: 60,
             time_base: (1, 60),
         });
         rb.audio_params = Some(AudioCodecParams {

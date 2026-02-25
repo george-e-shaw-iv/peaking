@@ -153,8 +153,6 @@ mod imp {
         audio_pts: i64,
         current_audio_packets: Vec<EncodedPacket>,
         pub audio_params: AudioCodecParams,
-
-        segment_index: u64,
     }
 
     impl SegmentEncoderInner {
@@ -206,7 +204,6 @@ mod imp {
                 extradata: read_extradata(video_ctx.0),
                 width: config.width,
                 height: config.height,
-                fps: config.fps,
                 time_base: (1, config.fps as i32),
             };
 
@@ -268,7 +265,6 @@ mod imp {
                 audio_pts: 0,
                 current_audio_packets: vec![],
                 audio_params,
-                segment_index: 0,
             })
         }
 
@@ -336,13 +332,9 @@ mod imp {
                 if first_new.is_key && prev_len > 0 {
                     let new_video = self.current_video_packets.split_off(prev_len);
                     new_segment = Some(EncodedSegment {
-                        index: self.segment_index,
                         video_packets: std::mem::replace(&mut self.current_video_packets, new_video),
                         audio_packets: std::mem::take(&mut self.current_audio_packets),
-                        video_time_base: self.video_params.time_base,
-                        audio_time_base: self.audio_params.time_base,
                     });
-                    self.segment_index += 1;
                 }
             }
 
@@ -421,11 +413,8 @@ mod imp {
             }
 
             Ok(Some(EncodedSegment {
-                index: self.segment_index,
                 video_packets: std::mem::take(&mut self.current_video_packets),
                 audio_packets: std::mem::take(&mut self.current_audio_packets),
-                video_time_base: self.video_params.time_base,
-                audio_time_base: self.audio_params.time_base,
             }))
         }
     }
@@ -467,7 +456,6 @@ impl SegmentEncoder {
                     extradata: vec![],
                     width: config.width,
                     height: config.height,
-                    fps: config.fps,
                     time_base: (1, config.fps as i32),
                 },
                 audio_params: AudioCodecParams {
@@ -539,12 +527,7 @@ mod tests {
     fn stub_push_video_frame_returns_none() {
         let cfg = EncoderConfig::default();
         let mut enc = SegmentEncoder::new(&cfg).unwrap();
-        let frame = RawFrame {
-            bgra_data: vec![0u8; 1920 * 1080 * 4],
-            width: 1920,
-            height: 1080,
-            timestamp_ms: 0,
-        };
+        let frame = RawFrame { bgra_data: vec![0u8; 1920 * 1080 * 4] };
         let result = enc.push_video_frame(&frame).unwrap();
         assert!(result.is_none());
     }
@@ -554,12 +537,7 @@ mod tests {
     fn stub_push_audio_returns_ok() {
         let cfg = EncoderConfig::default();
         let mut enc = SegmentEncoder::new(&cfg).unwrap();
-        let audio = RawAudio {
-            samples_f32: vec![0.0f32; 1024],
-            channels: 2,
-            sample_rate: 48_000,
-            timestamp_ms: 0,
-        };
+        let audio = RawAudio { samples_f32: vec![0.0f32; 1024] };
         assert!(enc.push_audio(&audio).is_ok());
     }
 
@@ -587,7 +565,7 @@ mod tests {
         let enc = SegmentEncoder::new(&cfg).unwrap();
         assert_eq!(enc.video_params.width, 2560);
         assert_eq!(enc.video_params.height, 1440);
-        assert_eq!(enc.video_params.fps, 30);
+        assert_eq!(enc.video_params.time_base, (1, 30));
         assert_eq!(enc.audio_params.sample_rate, 44_100);
         assert_eq!(enc.audio_params.channels, 2);
     }

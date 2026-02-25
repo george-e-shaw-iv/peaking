@@ -13,10 +13,6 @@ use tokio::sync::{mpsc, watch};
 pub struct RawFrame {
     /// Row-major BGRA pixels: width × height × 4 bytes.
     pub bgra_data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    /// Monotonic capture time in milliseconds since the start of the session.
-    pub timestamp_ms: u64,
 }
 
 // ── Windows implementation ────────────────────────────────────────────────────
@@ -24,7 +20,7 @@ pub struct RawFrame {
 #[cfg(windows)]
 mod imp {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use anyhow::{Context, Result};
     use tokio::sync::{mpsc, watch};
@@ -34,7 +30,7 @@ mod imp {
         Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem,
         GraphicsCaptureSession,
     };
-    use windows::Win32::Graphics::Direct3D11::IDirect3DDxgiInterfaceAccess;
+    use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
     use windows::Graphics::DirectX::DirectXPixelFormat;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -190,7 +186,6 @@ mod imp {
         }))?;
 
         session.StartCapture()?;
-        let session_start = Instant::now();
         eprintln!("[capture] WGC session started ({}×{})", width, height);
 
         loop {
@@ -200,11 +195,10 @@ mod imp {
 
             match cb_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => {
-                    let timestamp_ms = session_start.elapsed().as_millis() as u64;
                     match unsafe { readback_frame(&d3d_device, &d3d_context, &frame, width, height) }
                     {
                         Ok(bgra_data) => {
-                            let raw = RawFrame { bgra_data, width, height, timestamp_ms };
+                            let raw = RawFrame { bgra_data };
                             if frame_tx.send(raw).await.is_err() {
                                 break; // Encoder task dropped.
                             }
@@ -251,16 +245,8 @@ mod tests {
     #[test]
     fn raw_frame_stores_data() {
         let data = vec![0u8; 4];
-        let frame = RawFrame {
-            bgra_data: data.clone(),
-            width: 1,
-            height: 1,
-            timestamp_ms: 42,
-        };
+        let frame = RawFrame { bgra_data: data.clone() };
         assert_eq!(frame.bgra_data, data);
-        assert_eq!(frame.width, 1);
-        assert_eq!(frame.height, 1);
-        assert_eq!(frame.timestamp_ms, 42);
     }
 
     /// On non-Windows the `run` stub must return an error immediately.

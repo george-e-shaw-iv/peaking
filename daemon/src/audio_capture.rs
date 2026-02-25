@@ -12,17 +12,13 @@ use tokio::sync::{mpsc, watch};
 pub struct RawAudio {
     /// Interleaved float-32 samples: [L0, R0, L1, R1, …]
     pub samples_f32: Vec<f32>,
-    pub channels: u16,
-    pub sample_rate: u32,
-    /// Monotonic capture time in milliseconds since the start of the session.
-    pub timestamp_ms: u64,
 }
 
 // ── Windows implementation ────────────────────────────────────────────────────
 
 #[cfg(windows)]
 mod imp {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use anyhow::{Context, Result};
     use tokio::sync::{mpsc, watch};
@@ -39,29 +35,39 @@ mod imp {
 
     use super::RawAudio;
 
+    /// Safety: with COINIT_MULTITHREADED (MTA), WASAPI COM objects are safe to
+    /// use from any thread in the process. Wrapping them here lets the async
+    /// future be `Send` as required by `tokio::spawn`.
+    struct SendAudioState {
+        audio_client: IAudioClient,
+        capture_client: IAudioCaptureClient,
+    }
+    unsafe impl Send for SendAudioState {}
+
     pub async fn run(
         audio_tx: mpsc::Sender<RawAudio>,
         mut stop_rx: watch::Receiver<bool>,
     ) -> Result<()> {
-        unsafe {
-            // COM must be initialised on this thread.
+        // ── Synchronous initialisation (no await) ─────────────────────────────
+        //
+        // Nested blocks ensure `enumerator` and `device` are dropped before
+        // this section completes, so they are never captured in the async
+        // state machine that spans the loop below.
+        let (state, channels) = unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-            // Enumerate audio devices and get the default render endpoint.
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .context("Failed to create IMMDeviceEnumerator")?;
+            let audio_client: IAudioClient = {
+                let enumerator: IMMDeviceEnumerator =
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                        .context("Failed to create IMMDeviceEnumerator")?;
+                let device = enumerator
+                    .GetDefaultAudioEndpoint(eRender, eConsole)
+                    .context("Failed to get default audio render endpoint")?;
+                device
+                    .Activate(CLSCTX_ALL, None)
+                    .context("Failed to activate IAudioClient")?
+            }; // enumerator and device dropped here
 
-            let device = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .context("Failed to get default audio render endpoint")?;
-
-            let audio_client: IAudioClient = device
-                .Activate(CLSCTX_ALL, None)
-                .context("Failed to activate IAudioClient")?;
-
-            // Use the device's native mix format so we get the best-quality
-            // audio without sample-rate conversion.
             let fmt_ptr: *mut WAVEFORMATEX = audio_client
                 .GetMixFormat()
                 .context("GetMixFormat failed")?;
@@ -71,7 +77,6 @@ mod imp {
 
             // 200 ms buffer in 100-nanosecond units.
             let buffer_duration: i64 = 200 * 10_000;
-
             audio_client
                 .Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
@@ -91,60 +96,55 @@ mod imp {
 
             audio_client.Start().context("IAudioClient::Start failed")?;
 
-            let session_start = Instant::now();
             eprintln!("[audio] WASAPI loopback started ({}ch @ {}Hz)", channels, sample_rate);
 
-            loop {
-                if *stop_rx.borrow_and_update() {
-                    break;
-                }
+            (SendAudioState { audio_client, capture_client }, channels)
+        };
 
-                let next_packet_size = capture_client.GetNextPacketSize()?;
-                if next_packet_size == 0 {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
-                }
-
-                // Scope data_ptr (a raw pointer, not Send) to before the .await.
-                let (samples, timestamp_ms) = {
-                    let mut data_ptr = std::ptr::null_mut();
-                    let mut num_frames: u32 = 0;
-                    let mut flags: u32 = 0;
-
-                    capture_client
-                        .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
-                        .context("GetBuffer failed")?;
-
-                    let timestamp_ms = session_start.elapsed().as_millis() as u64;
-                    let num_samples = num_frames as usize * channels as usize;
-
-                    let samples: Vec<f32> = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
-                        vec![0.0f32; num_samples]
-                    } else {
-                        // WASAPI in shared mode with FLOAT mix format delivers IEEE 754 f32.
-                        std::slice::from_raw_parts(data_ptr as *const f32, num_samples).to_vec()
-                    };
-
-                    capture_client
-                        .ReleaseBuffer(num_frames)
-                        .context("ReleaseBuffer failed")?;
-
-                    (samples, timestamp_ms)
-                };
-
-                let _ = audio_tx
-                    .send(RawAudio {
-                        samples_f32: samples,
-                        channels,
-                        sample_rate,
-                        timestamp_ms,
-                    })
-                    .await;
+        // ── Async capture loop ────────────────────────────────────────────────
+        loop {
+            if *stop_rx.borrow_and_update() {
+                break;
             }
 
-            audio_client.Stop()?;
-            eprintln!("[audio] WASAPI loopback stopped");
+            let next_packet_size = unsafe { state.capture_client.GetNextPacketSize()? };
+            if next_packet_size == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+
+            // Scope the raw pointer to before the .await so it is never held
+            // across a suspension point.
+            let samples = unsafe {
+                let mut data_ptr = std::ptr::null_mut();
+                let mut num_frames: u32 = 0;
+                let mut flags: u32 = 0;
+
+                state.capture_client
+                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
+                    .context("GetBuffer failed")?;
+
+                let num_samples = num_frames as usize * channels as usize;
+
+                let samples: Vec<f32> = if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                    vec![0.0f32; num_samples]
+                } else {
+                    // WASAPI in shared mode with FLOAT mix format delivers IEEE 754 f32.
+                    std::slice::from_raw_parts(data_ptr as *const f32, num_samples).to_vec()
+                };
+
+                state.capture_client
+                    .ReleaseBuffer(num_frames)
+                    .context("ReleaseBuffer failed")?;
+
+                samples
+            };
+
+            let _ = audio_tx.send(RawAudio { samples_f32: samples }).await;
         }
+
+        unsafe { state.audio_client.Stop()? };
+        eprintln!("[audio] WASAPI loopback stopped");
         Ok(())
     }
 }
@@ -175,16 +175,8 @@ mod tests {
     #[test]
     fn raw_audio_stores_data() {
         let samples = vec![0.5f32, -0.5f32];
-        let audio = RawAudio {
-            samples_f32: samples.clone(),
-            channels: 2,
-            sample_rate: 48_000,
-            timestamp_ms: 100,
-        };
+        let audio = RawAudio { samples_f32: samples.clone() };
         assert_eq!(audio.samples_f32, samples);
-        assert_eq!(audio.channels, 2);
-        assert_eq!(audio.sample_rate, 48_000);
-        assert_eq!(audio.timestamp_ms, 100);
     }
 
     /// On non-Windows the `run` stub must return an error immediately.
