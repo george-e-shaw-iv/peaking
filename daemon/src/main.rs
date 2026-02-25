@@ -9,7 +9,6 @@ mod paths;
 mod pipeline;
 mod process_monitor;
 mod ring_buffer;
-mod startup;
 mod status;
 
 use std::sync::{Arc, Mutex};
@@ -20,19 +19,6 @@ use crate::ring_buffer::RingBuffer;
 
 #[tokio::main]
 async fn main() {
-    // ── CLI flags ─────────────────────────────────────────────────────────────
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--unregister-startup") {
-        match startup::unregister_startup() {
-            Ok(()) => println!("Startup registration removed."),
-            Err(e) => {
-                eprintln!("[startup] Failed to remove startup registration: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
     // ── App data directory ────────────────────────────────────────────────────
     let app_dir = paths::app_data_dir();
     if let Err(e) = std::fs::create_dir_all(&app_dir) {
@@ -74,13 +60,6 @@ async fn main() {
                 let _ = tx.send(event::DaemonEvent::Shutdown).await;
             }
         });
-    }
-
-    // ── Windows startup registration ──────────────────────────────────────────
-    // Register on every launch (idempotent) so the daemon survives reinstalls.
-    if let Err(e) = startup::register_startup() {
-        eprintln!("[startup] Failed to register startup entry: {e}");
-        // Non-fatal — the daemon continues to function.
     }
 
     println!("peaking-daemon v{} started", env!("CARGO_PKG_VERSION"));

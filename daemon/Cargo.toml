@@ -45,6 +45,4 @@ windows = { version = "0.57", features = [
     # Low-level keyboard hook (WH_KEYBOARD_LL)
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
-    # Windows startup registry
-    "Win32_System_Registry",
 ] }
