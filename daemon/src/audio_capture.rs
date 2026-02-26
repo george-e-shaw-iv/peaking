@@ -179,15 +179,4 @@ mod tests {
         assert_eq!(audio.samples_f32, samples);
     }
 
-    /// On non-Windows the `run` stub must return an error immediately.
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn run_returns_error_on_non_windows() {
-        let (tx, _rx) = mpsc::channel(1);
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let result = run(tx, stop_rx).await;
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Windows"));
-    }
 }

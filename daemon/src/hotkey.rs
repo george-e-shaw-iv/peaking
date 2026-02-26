@@ -301,43 +301,42 @@ mod tests {
         assert_eq!(parse_vk("\t"), None);
     }
 
-    // ── Non-Windows stub ──────────────────────────────────────────────────────
+    // ── Windows: HotkeyHandle lifecycle ───────────────────────────────────────
 
-    /// Verifies the stub compiles and completes all lifecycle calls without
-    /// panicking.  Only executed on non-Windows because on Windows `start`
-    /// would spawn a real hook thread (requiring a display server).
-    #[cfg(not(windows))]
+    /// Exercises the full `start → update_key → stop` lifecycle on Windows and
+    /// verifies that `update_key` writes the expected virtual-key code into the
+    /// `HOOK_VK` atomic that the hook callback reads.
+    ///
+    /// Only one test calls `start()` to avoid installing multiple
+    /// `WH_KEYBOARD_LL` hooks in the same test binary.
+    #[cfg(windows)]
     #[test]
-    fn stub_lifecycle_does_not_panic() {
-        // tokio::sync::mpsc::channel doesn't need a runtime to construct.
-        let (tx, _rx) = mpsc::channel(4);
+    fn lifecycle_start_update_key_stop_does_not_panic() {
+        use crate::event::DaemonEvent;
+        use std::sync::atomic::Ordering;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<DaemonEvent>(8);
         let handle = start("F8", tx);
+
+        // The initial key must be stored immediately.
+        assert_eq!(
+            HOOK_VK.load(Ordering::Relaxed),
+            parse_vk("F8").unwrap(),
+            "HOOK_VK should contain the F8 VK code after start()"
+        );
+
+        // update_key stores the VK code for the new key.
         handle.update_key("F9");
-        handle.update_key(""); // disables hotkey
-        handle.update_key("invalid_key");
-        handle.stop();
-    }
-
-    /// On non-Windows, `update_key` must still write through to `HOOK_VK` so
-    /// that if the logic is ever exercised the right value is in place.
-    #[cfg(not(windows))]
-    #[test]
-    fn stub_update_key_writes_hook_vk() {
-        // Each assertion is a self-contained write-then-read with no yield
-        // point in between, so parallel tests that write different values
-        // cannot interleave within a single assertion.
-        let (tx, _rx) = mpsc::channel(4);
-        let handle = start("F8", tx);
-
-        handle.update_key("F1");
-        assert_eq!(HOOK_VK.load(Ordering::Relaxed), 0x70);
+        assert_eq!(HOOK_VK.load(Ordering::Relaxed), parse_vk("F9").unwrap());
 
         handle.update_key("Z");
-        assert_eq!(HOOK_VK.load(Ordering::Relaxed), b'Z' as u32);
+        assert_eq!(HOOK_VK.load(Ordering::Relaxed), parse_vk("Z").unwrap());
 
-        handle.update_key("bad");
+        // An unrecognised key name disables the hotkey (stores 0).
+        handle.update_key("NotAKey");
         assert_eq!(HOOK_VK.load(Ordering::Relaxed), 0);
 
         handle.stop();
     }
+
 }

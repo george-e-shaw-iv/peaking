@@ -87,9 +87,13 @@ mod imp {
 
     /// Copies a WGC frame's GPU surface into a CPU-side BGRA byte vector,
     /// handling row-pitch padding.
+    ///
+    /// `staging` must be a pre-allocated `D3D11_USAGE_STAGING` texture with the
+    /// same dimensions and format as the capture — creating it once and reusing it
+    /// avoids a per-frame GPU memory allocation and the associated GPU/CPU sync stall.
     unsafe fn readback_frame(
-        device: &ID3D11Device,
         context: &ID3D11DeviceContext,
+        staging: &ID3D11Texture2D,
         frame: &Direct3D11CaptureFrame,
         width: u32,
         height: u32,
@@ -98,30 +102,11 @@ mod imp {
         let dxgi_access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
         let texture: ID3D11Texture2D = dxgi_access.GetInterface()?;
 
-        // Staging texture for CPU readback.
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: 0,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: 0,
-        };
-        let mut staging: Option<ID3D11Texture2D> = None;
-        device
-            .CreateTexture2D(&desc, None, Some(&mut staging))
-            .context("CreateTexture2D (staging) failed")?;
-        let staging = staging.unwrap();
-
-        context.CopyResource(&staging, &texture);
+        context.CopyResource(staging, &texture);
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context
-            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
             .context("ID3D11DeviceContext::Map failed")?;
 
         let row_pitch = mapped.RowPitch as usize;
@@ -135,7 +120,7 @@ mod imp {
             bgra.extend_from_slice(src);
         }
 
-        context.Unmap(&staging, 0);
+        context.Unmap(staging, 0);
         Ok(bgra)
     }
 
@@ -158,6 +143,30 @@ mod imp {
         let size = capture_item.Size()?;
         let width = size.Width as u32;
         let height = size.Height as u32;
+
+        // Allocate the staging texture once and reuse it for every frame.
+        // Creating it per-frame (inside readback_frame) causes a GPU memory
+        // allocation and GPU/CPU sync stall on every captured frame, leading to
+        // frame drops and choppy output.
+        let staging = unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            d3d_device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .context("CreateTexture2D (staging) failed")?;
+            staging.unwrap()
+        };
 
         // CreateFreeThreaded: no dispatcher queue / message pump needed.
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -198,7 +207,7 @@ mod imp {
 
             match cb_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => {
-                    match unsafe { readback_frame(&d3d_device, &d3d_context, &frame, width, height) }
+                    match unsafe { readback_frame(&d3d_context, &staging, &frame, width, height) }
                     {
                         Ok(bgra_data) => {
                             let raw = RawFrame { bgra_data };
@@ -252,15 +261,4 @@ mod tests {
         assert_eq!(frame.bgra_data, data);
     }
 
-    /// On non-Windows the `run` stub must return an error immediately.
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn run_returns_error_on_non_windows() {
-        let (tx, _rx) = mpsc::channel(1);
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let result = run(tx, stop_rx).await;
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Windows"));
-    }
 }

@@ -407,4 +407,78 @@ mod tests {
         assert!(!parent_name.contains(':'));
         assert!(!parent_name.contains('"'));
     }
+
+    // ── expand_env: additional variables ──────────────────────────────────────
+
+    #[test]
+    fn expand_env_replaces_appdata() {
+        std::env::set_var("APPDATA", r"C:\Users\TestUser\AppData\Roaming");
+        let result = expand_env(r"%APPDATA%\Peaking");
+        assert_eq!(result, r"C:\Users\TestUser\AppData\Roaming\Peaking");
+    }
+
+    #[test]
+    fn expand_env_replaces_localappdata() {
+        std::env::set_var("LOCALAPPDATA", r"C:\Users\TestUser\AppData\Local");
+        let result = expand_env(r"%LOCALAPPDATA%\Peaking");
+        assert_eq!(result, r"C:\Users\TestUser\AppData\Local\Peaking");
+    }
+
+    #[test]
+    fn expand_env_replaces_tmp() {
+        std::env::set_var("TMP", r"C:\Windows\Temp");
+        let result = expand_env(r"%TMP%\cache");
+        assert_eq!(result, r"C:\Windows\Temp\cache");
+    }
+
+    // ── sanitize_dirname: remaining illegal Windows characters ────────────────
+
+    #[test]
+    fn sanitize_dirname_replaces_backslash() {
+        let result = sanitize_dirname(r"Game\Sub");
+        assert!(!result.contains('\\'), "backslash should be replaced: {result}");
+    }
+
+    #[test]
+    fn sanitize_dirname_replaces_pipe_star_and_question() {
+        let result = sanitize_dirname("Game|Name?Star*");
+        assert!(!result.contains('|'), "pipe should be replaced: {result}");
+        assert!(!result.contains('*'), "star should be replaced: {result}");
+        assert!(!result.contains('?'), "question mark should be replaced: {result}");
+    }
+
+    // ── build_output_path: filename format ────────────────────────────────────
+
+    #[test]
+    fn build_output_path_filename_has_timestamp_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip_dir = dir.path().to_string_lossy().into_owned();
+        let path = build_output_path(&clip_dir, "TestGame").unwrap();
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        // Stem should be YYYY-MM-DD_HH-MM-SS (19 characters).
+        assert_eq!(stem.len(), 19, "Unexpected stem: {stem}");
+        assert_eq!(&stem[4..5], "-");
+        assert_eq!(&stem[7..8], "-");
+        assert_eq!(&stem[10..11], "_");
+        assert_eq!(&stem[13..14], "-");
+        assert_eq!(&stem[16..17], "-");
+    }
+
+    // ── flush_to_disk: empty-segments guard ───────────────────────────────────
+
+    #[tokio::test]
+    async fn flush_to_disk_with_empty_segments_returns_error() {
+        use crate::ring_buffer::{AudioCodecParams, VideoCodecParams};
+        let result = flush_to_disk(
+            vec![],
+            VideoCodecParams { extradata: vec![], width: 1920, height: 1080, time_base: (1, 60) },
+            AudioCodecParams { extradata: vec![], sample_rate: 48_000, channels: 2, time_base: (1, 48_000) },
+            std::env::temp_dir().to_string_lossy().into_owned(),
+            "TestGame".to_string(),
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("empty"), "Expected 'empty' in error: {msg}");
+    }
 }

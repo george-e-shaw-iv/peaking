@@ -11,6 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::{sync::{mpsc, watch}, task::JoinHandle};
+use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::audio_capture::{self, RawAudio};
 use crate::capture::{self, RawFrame};
@@ -142,6 +143,27 @@ async fn run_encoder(
                     Ok(None) => {}
                     Err(e) => eprintln!("[encoder] Video error: {e}"),
                 }
+                // After encoding a video frame, eagerly drain every audio chunk
+                // that has accumulated in the channel.  Without this, video
+                // encoding (blocking C FFI calls) can dominate the select loop
+                // and starve audio.  A starved audio sender blocks on
+                // audio_tx.send().await, the WASAPI ring buffer overflows, and
+                // samples are permanently lost — causing audio to cut out.
+                loop {
+                    match audio_rx.try_recv() {
+                        Ok(audio) => {
+                            if let Err(e) = encoder.push_audio(&audio) {
+                                eprintln!("[encoder] Audio error: {e}");
+                            }
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            // Audio task exited; the next select iteration will
+                            // pick up the None from audio_rx.recv() and break.
+                            break;
+                        }
+                    }
+                }
             }
             audio = audio_rx.recv() => {
                 let Some(audio) = audio else { break };
@@ -160,3 +182,4 @@ async fn run_encoder(
 
     eprintln!("[encoder] Stopped for '{display_name}'");
 }
+

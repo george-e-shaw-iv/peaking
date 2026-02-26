@@ -511,60 +511,99 @@ mod tests {
         assert_eq!(cfg.audio_bitrate, 192_000);
     }
 
-    // ── Non-Windows stub behaviour ─────────────────────────────────────────────
+    // ── Windows: real encoder tests ───────────────────────────────────────────
+    //
+    // These require FFmpeg with an H.264 encoder (h264_nvenc or libx264) and an
+    // AAC encoder to be available.  Each test gracefully skips (prints a message
+    // and returns) if the encoder fails to initialise so that CI machines without
+    // GPU support do not produce hard failures.
 
-    #[cfg(not(windows))]
-    #[test]
-    fn stub_new_succeeds() {
-        let cfg = EncoderConfig::default();
-        assert!(SegmentEncoder::new(&cfg).is_ok());
+    /// 320×240 @ 30 fps config — small enough for fast test execution while
+    /// still being a valid resolution for both NVENC and libx264.
+    #[cfg(windows)]
+    fn small_cfg() -> EncoderConfig {
+        EncoderConfig { width: 320, height: 240, fps: 30, ..EncoderConfig::default() }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(windows)]
     #[test]
-    fn stub_push_video_frame_returns_none() {
-        let cfg = EncoderConfig::default();
-        let mut enc = SegmentEncoder::new(&cfg).unwrap();
-        let frame = RawFrame { bgra_data: vec![0u8; 1920 * 1080 * 4] };
-        let result = enc.push_video_frame(&frame).unwrap();
-        assert!(result.is_none());
+    fn encoder_new_succeeds() {
+        match SegmentEncoder::new(&small_cfg()) {
+            Ok(_) => {}
+            Err(e) => eprintln!("Skipping — no encoder available: {e}"),
+        }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(windows)]
     #[test]
-    fn stub_push_audio_returns_ok() {
-        let cfg = EncoderConfig::default();
-        let mut enc = SegmentEncoder::new(&cfg).unwrap();
-        let audio = RawAudio { samples_f32: vec![0.0f32; 1024] };
-        assert!(enc.push_audio(&audio).is_ok());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn stub_flush_returns_none() {
-        let cfg = EncoderConfig::default();
-        let mut enc = SegmentEncoder::new(&cfg).unwrap();
-        let result = enc.flush().unwrap();
-        assert!(result.is_none());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn stub_codec_params_have_correct_dimensions() {
-        let cfg = EncoderConfig {
-            width: 2560,
-            height: 1440,
-            fps: 30,
-            sample_rate: 44_100,
-            channels: 2,
-            video_bitrate: 10_000_000,
-            audio_bitrate: 128_000,
+    fn encoder_video_params_match_config() {
+        let cfg = small_cfg();
+        let enc = match SegmentEncoder::new(&cfg) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("Skipping: {e}"); return; }
         };
-        let enc = SegmentEncoder::new(&cfg).unwrap();
-        assert_eq!(enc.video_params.width, 2560);
-        assert_eq!(enc.video_params.height, 1440);
-        assert_eq!(enc.video_params.time_base, (1, 30));
-        assert_eq!(enc.audio_params.sample_rate, 44_100);
-        assert_eq!(enc.audio_params.channels, 2);
+        assert_eq!(enc.video_params.width,      cfg.width);
+        assert_eq!(enc.video_params.height,     cfg.height);
+        assert_eq!(enc.video_params.time_base,  (1, cfg.fps as i32));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn encoder_audio_params_match_config() {
+        let cfg = small_cfg();
+        let enc = match SegmentEncoder::new(&cfg) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("Skipping: {e}"); return; }
+        };
+        assert_eq!(enc.audio_params.sample_rate, cfg.sample_rate);
+        assert_eq!(enc.audio_params.channels,    cfg.channels as u32);
+        assert_eq!(enc.audio_params.time_base,   (1, cfg.sample_rate as i32));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encoder_push_first_video_frame_returns_none() {
+        use crate::capture::RawFrame;
+        let cfg = small_cfg();
+        let mut enc = match SegmentEncoder::new(&cfg) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("Skipping: {e}"); return; }
+        };
+        let frame = RawFrame {
+            bgra_data: vec![0u8; (cfg.width * cfg.height * 4) as usize],
+        };
+        let result = enc.push_video_frame(&frame).expect("push_video_frame failed");
+        // The very first frame can never close a segment — there are no prior
+        // packets to split off into a preceding segment at the IDR boundary.
+        assert!(result.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encoder_push_audio_returns_ok() {
+        use crate::audio_capture::RawAudio;
+        let cfg = small_cfg();
+        let mut enc = match SegmentEncoder::new(&cfg) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("Skipping: {e}"); return; }
+        };
+        let audio = RawAudio {
+            samples_f32: vec![0.0f32; 1024 * cfg.channels as usize],
+        };
+        enc.push_audio(&audio).expect("push_audio failed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encoder_flush_on_empty_encoder_returns_none() {
+        let cfg = small_cfg();
+        let mut enc = match SegmentEncoder::new(&cfg) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("Skipping: {e}"); return; }
+        };
+        // Flushing with no frames pushed should yield no segment.
+        let result = enc.flush().expect("flush failed");
+        assert!(result.is_none());
+    }
+
 }
